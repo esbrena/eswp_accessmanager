@@ -644,6 +644,11 @@ function cie_admin_aprobar_solicitud() {
         exit;
     }
 
+    if ($request->post_status !== 'pending') {
+        wp_safe_redirect(cie_get_admin_page_url(['cie_notice' => 'solicitud_ya_resuelta']));
+        exit;
+    }
+
     $user_id = (int) $request->post_author;
     $months = (int) get_post_meta($request_id, 'meses', true);
     if ($months < 1) {
@@ -702,6 +707,11 @@ function cie_admin_rechazar_solicitud() {
     $request = get_post($request_id);
     if (!$request || $request->post_type !== 'solicitud') {
         wp_safe_redirect(cie_get_admin_page_url(['cie_notice' => 'solicitud_no_encontrada']));
+        exit;
+    }
+
+    if ($request->post_status !== 'pending') {
+        wp_safe_redirect(cie_get_admin_page_url(['cie_notice' => 'solicitud_ya_resuelta']));
         exit;
     }
 
@@ -810,6 +820,7 @@ function cie_render_admin_notices() {
         'solicitud_revocada' => ['updated', 'Solicitud revocada correctamente.'],
         'acceso_renovado' => ['updated', 'Acceso renovado correctamente desde la tabla.'],
         'solicitud_no_encontrada' => ['error', 'No se encontro la solicitud indicada.'],
+        'solicitud_ya_resuelta' => ['error', 'La solicitud ya fue procesada previamente.'],
     ];
 
     if ($notice === 'error') {
@@ -840,6 +851,11 @@ function cie_render_reject_form_box() {
     $request = get_post($request_id);
     if (!$request || $request->post_type !== 'solicitud') {
         echo '<div class="notice notice-error"><p>No se encontro la solicitud.</p></div>';
+        return;
+    }
+
+    if ($request->post_status !== 'pending') {
+        echo '<div class="notice notice-error"><p>La solicitud ya fue procesada previamente.</p></div>';
         return;
     }
 
