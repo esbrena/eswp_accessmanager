@@ -43,6 +43,10 @@ function cie_allowed_roles() {
     return ['cie_user', 'cie_user_new'];
 }
 
+function cie_admin_capability() {
+    return apply_filters('cie_admin_capability', 'manage_options');
+}
+
 function cie_user_has_allowed_role($user_or_id) {
     $user = is_numeric($user_or_id) ? get_userdata((int) $user_or_id) : $user_or_id;
     if (!$user || empty($user->roles)) {
@@ -631,7 +635,7 @@ function cie_notify_request_target($request_id, $notify_email = '') {
 add_action('admin_post_cie_solicitud_aprobar', 'cie_admin_aprobar_solicitud');
 
 function cie_admin_aprobar_solicitud() {
-    if (!current_user_can('manage_options')) {
+    if (!current_user_can(cie_admin_capability())) {
         wp_die('No autorizado.');
     }
 
@@ -697,7 +701,7 @@ function cie_admin_aprobar_solicitud() {
 add_action('admin_post_cie_solicitud_rechazar', 'cie_admin_rechazar_solicitud');
 
 function cie_admin_rechazar_solicitud() {
-    if (!current_user_can('manage_options')) {
+    if (!current_user_can(cie_admin_capability())) {
         wp_die('No autorizado.');
     }
 
@@ -746,7 +750,7 @@ function cie_admin_rechazar_solicitud() {
 add_action('admin_post_cie_renovar_usuario', 'cie_admin_renovar_usuario');
 
 function cie_admin_renovar_usuario() {
-    if (!current_user_can('manage_options')) {
+    if (!current_user_can(cie_admin_capability())) {
         wp_die('No autorizado.');
     }
 
@@ -798,16 +802,50 @@ function cie_admin_renovar_usuario() {
 ===================================================== */
 
 add_action('admin_menu', function () {
+    $capability = cie_admin_capability();
+
     add_menu_page(
         'Gestion acceso',
         'Gestion acceso',
-        'manage_options',
+        $capability,
         'cie_gestion_acceso',
         'cie_render_admin_page',
         'dashicons-shield-alt',
         25
     );
+
+    add_submenu_page(
+        'cie_gestion_acceso',
+        'Accesos',
+        'Accesos',
+        $capability,
+        'cie_gestion_acceso',
+        'cie_render_admin_page'
+    );
+
+    add_submenu_page(
+        'cie_gestion_acceso',
+        'Solicitudes',
+        'Solicitudes',
+        $capability,
+        'edit.php?post_type=solicitud'
+    );
+
+    // Compatibilidad con la URL historica: ?page=cie_accesos
+    add_submenu_page(
+        null,
+        'Accesos',
+        'Accesos',
+        $capability,
+        'cie_accesos',
+        'cie_render_admin_page_legacy_redirect'
+    );
 });
+
+function cie_render_admin_page_legacy_redirect() {
+    wp_safe_redirect(cie_get_admin_page_url());
+    exit;
+}
 
 function cie_render_admin_notices() {
     if (!isset($_GET['cie_notice'])) {
@@ -889,7 +927,7 @@ function cie_render_reject_form_box() {
 }
 
 function cie_render_admin_page() {
-    if (!current_user_can('manage_options')) {
+    if (!current_user_can(cie_admin_capability())) {
         return;
     }
 
