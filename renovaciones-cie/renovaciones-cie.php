@@ -278,6 +278,118 @@ function cie_get_admin_page_url($args = []) {
     return add_query_arg($args, admin_url('admin.php?page=cie_gestion_acceso'));
 }
 
+function cie_get_requests_page_url($args = []) {
+    return add_query_arg($args, admin_url('edit.php?post_type=solicitud'));
+}
+
+function cie_get_request_edit_url($request_id, $args = []) {
+    $base = admin_url('post.php?post=' . (int) $request_id . '&action=edit');
+    return empty($args) ? $base : add_query_arg($args, $base);
+}
+
+function cie_get_request_state($request_or_id) {
+    $request = ($request_or_id instanceof WP_Post) ? $request_or_id : get_post((int) $request_or_id);
+    if (!$request || $request->post_type !== 'solicitud') {
+        return 'desconocido';
+    }
+
+    $meta_state = (string) get_post_meta($request->ID, 'cie_resultado', true);
+    if ($meta_state !== '') {
+        return $meta_state;
+    }
+
+    $status_map = [
+        'pending' => 'pendiente',
+        'publish' => 'aprobada',
+        'draft' => 'revocada',
+    ];
+
+    return isset($status_map[$request->post_status]) ? $status_map[$request->post_status] : 'desconocido';
+}
+
+function cie_get_request_state_label($state) {
+    $labels = [
+        'pendiente' => 'Pendiente',
+        'aprobada' => 'Aprobada',
+        'revocada' => 'Revocada',
+        'desconocido' => 'Desconocido',
+    ];
+
+    return isset($labels[$state]) ? $labels[$state] : ucfirst($state);
+}
+
+function cie_get_request_state_html($request_or_id) {
+    $state = cie_get_request_state($request_or_id);
+    $colors = [
+        'pendiente' => '#b26200',
+        'aprobada' => '#008a20',
+        'revocada' => '#b32d2e',
+        'desconocido' => '#646970',
+    ];
+
+    $color = isset($colors[$state]) ? $colors[$state] : '#646970';
+    return '<span style="color:' . esc_attr($color) . ';font-weight:600;">' . esc_html(cie_get_request_state_label($state)) . '</span>';
+}
+
+function cie_get_request_action_token($request_id) {
+    $request_id = (int) $request_id;
+    if ($request_id <= 0) {
+        return '';
+    }
+
+    $token = (string) get_post_meta($request_id, 'cie_action_token', true);
+    if ($token === '') {
+        $token = wp_generate_password(32, false, false);
+        update_post_meta($request_id, 'cie_action_token', $token);
+    }
+
+    return $token;
+}
+
+function cie_validate_request_action_token($request_id, $token) {
+    $saved = cie_get_request_action_token($request_id);
+    $token = (string) $token;
+
+    if ($saved === '' || $token === '') {
+        return false;
+    }
+
+    return hash_equals($saved, $token);
+}
+
+function cie_get_request_approve_url($request_id, $include_token = false, $args = []) {
+    $request_id = (int) $request_id;
+    $query_args = array_merge([
+        'action' => 'cie_solicitud_aprobar',
+        'solicitud_id' => $request_id,
+    ], $args);
+
+    if ($include_token) {
+        $query_args['token'] = cie_get_request_action_token($request_id);
+    }
+
+    return add_query_arg($query_args, admin_url('admin-post.php'));
+}
+
+function cie_get_request_redirect_url($fallback_url) {
+    $raw = isset($_REQUEST['redirect_to']) ? wp_unslash($_REQUEST['redirect_to']) : '';
+    if (!is_string($raw) || $raw === '') {
+        return $fallback_url;
+    }
+
+    $validated = wp_validate_redirect($raw, $fallback_url);
+    return $validated ?: $fallback_url;
+}
+
+function cie_render_request_mail_template($template, array $replacements) {
+    $message = (string) $template;
+    if ($message === '') {
+        return $message;
+    }
+
+    return strtr($message, $replacements);
+}
+
 function cie_build_user_request_map(array $user_ids) {
     $map = [
         'any' => [],
@@ -401,14 +513,208 @@ add_action('init', function () {
         'labels' => [
             'name' => 'Solicitudes',
             'singular_name' => 'Solicitud',
+            'menu_name' => 'Solicitudes',
+            'edit_item' => 'Gestionar solicitud',
         ],
         'public' => false,
         'show_ui' => true,
         'show_in_menu' => 'cie_gestion_acceso',
         'menu_icon' => 'dashicons-clock',
-        'supports' => ['title', 'author', 'custom-fields'],
+        'supports' => ['title', 'author'],
+        'capability_type' => 'post',
+        'map_meta_cap' => true,
     ]);
 });
+
+add_filter('manage_edit-solicitud_columns', function ($columns) {
+    return [
+        'cb' => $columns['cb'] ?? '<input type="checkbox">',
+        'title' => 'Solicitud',
+        'cie_usuario' => 'Usuario',
+        'cie_meses' => 'Meses',
+        'cie_estado' => 'Estado',
+        'cie_fecha_solicitud' => 'Fecha solicitud',
+        'cie_acciones' => 'Acciones',
+        'date' => 'Fecha',
+    ];
+});
+
+add_action('manage_solicitud_posts_custom_column', function ($column, $post_id) {
+    $request = get_post($post_id);
+    if (!$request || $request->post_type !== 'solicitud') {
+        return;
+    }
+
+    if ($column === 'cie_usuario') {
+        $user = get_userdata((int) $request->post_author);
+        if (!$user) {
+            echo esc_html('Usuario no disponible');
+            return;
+        }
+
+        echo '<strong>' . esc_html($user->display_name) . '</strong><br><small>' . esc_html($user->user_email) . '</small>';
+        return;
+    }
+
+    if ($column === 'cie_meses') {
+        $months = (int) get_post_meta($post_id, 'meses', true);
+        echo esc_html($months > 0 ? (string) $months : '-');
+        return;
+    }
+
+    if ($column === 'cie_estado') {
+        echo wp_kses_post(cie_get_request_state_html($request));
+        return;
+    }
+
+    if ($column === 'cie_fecha_solicitud') {
+        $requested_at = (string) get_post_meta($post_id, 'fecha_solicitud', true);
+        echo esc_html($requested_at !== '' ? $requested_at : '-');
+        return;
+    }
+
+    if ($column === 'cie_acciones') {
+        $state = cie_get_request_state($request);
+        $buttons = [];
+
+        if ($state === 'pendiente') {
+            $buttons[] = '<a class="button button-small" href="' . esc_url(cie_get_request_approve_url($post_id, true, [
+                'redirect_to' => cie_get_requests_page_url(),
+            ])) . '">Aprobar</a>';
+            $buttons[] = '<a class="button button-small" href="' . esc_url(cie_get_request_edit_url($post_id)) . '">Revocar + correo</a>';
+        } else {
+            $buttons[] = '<a class="button button-small" href="' . esc_url(cie_get_request_edit_url($post_id)) . '">Ver detalle</a>';
+        }
+
+        if (current_user_can('delete_post', $post_id)) {
+            $delete_link = get_delete_post_link($post_id);
+            if ($delete_link) {
+                $buttons[] = '<a class="button button-small" href="' . esc_url($delete_link) . '">Eliminar</a>';
+            }
+        }
+
+        echo wp_kses_post(implode(' ', $buttons));
+    }
+}, 10, 2);
+
+add_filter('post_row_actions', function ($actions, $post) {
+    if (!$post instanceof WP_Post || $post->post_type !== 'solicitud') {
+        return $actions;
+    }
+
+    $actions['cie_edit_request'] = '<a href="' . esc_url(cie_get_request_edit_url($post->ID)) . '">Gestionar</a>';
+
+    if (cie_get_request_state($post) === 'pendiente') {
+        $actions['cie_approve_request'] = '<a href="' . esc_url(cie_get_request_approve_url($post->ID, true, [
+            'redirect_to' => cie_get_requests_page_url(),
+        ])) . '">Aprobar</a>';
+        $actions['cie_revoke_request'] = '<a href="' . esc_url(cie_get_request_edit_url($post->ID)) . '">Revocar + correo</a>';
+    }
+
+    if (!isset($actions['trash']) && current_user_can('delete_post', $post->ID)) {
+        $delete_link = get_delete_post_link($post->ID);
+        if ($delete_link) {
+            $actions['trash'] = '<a href="' . esc_url($delete_link) . '" class="submitdelete">Eliminar</a>';
+        }
+    }
+
+    return $actions;
+}, 10, 2);
+
+add_action('add_meta_boxes_solicitud', function () {
+    add_meta_box(
+        'cie-solicitud-resumen',
+        'Resumen de solicitud',
+        'cie_render_solicitud_resumen_metabox',
+        'solicitud',
+        'normal',
+        'high'
+    );
+
+    add_meta_box(
+        'cie-solicitud-acciones',
+        'Aprobar o revocar solicitud',
+        'cie_render_solicitud_acciones_metabox',
+        'solicitud',
+        'side',
+        'high'
+    );
+});
+
+function cie_render_solicitud_resumen_metabox($post) {
+    if (!$post instanceof WP_Post || $post->post_type !== 'solicitud') {
+        return;
+    }
+
+    $user = get_userdata((int) $post->post_author);
+    $months = (int) get_post_meta($post->ID, 'meses', true);
+    $requested_at = (string) get_post_meta($post->ID, 'fecha_solicitud', true);
+    $state = cie_get_request_state_html($post);
+    $period = $user ? get_user_meta($user->ID, 'use_period', true) : '';
+
+    echo '<p><strong>Usuario:</strong> ' . esc_html($user ? $user->display_name : 'No disponible') . '</p>';
+    echo '<p><strong>Email:</strong> ' . esc_html($user ? $user->user_email : 'No disponible') . '</p>';
+    echo '<p><strong>Meses solicitados:</strong> ' . esc_html($months > 0 ? (string) $months : '-') . '</p>';
+    echo '<p><strong>Estado:</strong> ' . wp_kses_post($state) . '</p>';
+    echo '<p><strong>Fecha de solicitud:</strong> ' . esc_html($requested_at ?: '-') . '</p>';
+    echo '<p><strong>Periodo actual:</strong> ' . esc_html($period ?: 'Sin periodo') . '</p>';
+}
+
+function cie_render_solicitud_acciones_metabox($post) {
+    if (!$post instanceof WP_Post || $post->post_type !== 'solicitud') {
+        return;
+    }
+
+    $is_pending = cie_get_request_state($post) === 'pendiente';
+    $edit_url = cie_get_request_edit_url($post->ID);
+    ?>
+    <div id="cie-solicitud-acciones">
+        <?php if (!$is_pending) : ?>
+            <p><strong>Esta solicitud ya fue resuelta.</strong></p>
+            <p>Puedes eliminarla desde la lista de solicitudes si ya no la necesitas.</p>
+        <?php else : ?>
+            <p style="margin-top:0;">Desde esta solicitud puedes aprobar o revocar y personalizar el correo al usuario.</p>
+
+            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin-bottom:12px;">
+                <input type="hidden" name="action" value="cie_solicitud_aprobar">
+                <input type="hidden" name="solicitud_id" value="<?php echo (int) $post->ID; ?>">
+                <input type="hidden" name="redirect_to" value="<?php echo esc_url($edit_url); ?>">
+                <?php wp_nonce_field('cie_solicitud_aprobar_manual_' . (int) $post->ID, 'cie_approve_nonce'); ?>
+                <p style="margin:0 0 6px;">
+                    <label for="cie-asunto-aprobacion-<?php echo (int) $post->ID; ?>"><strong>Asunto aprobacion</strong></label>
+                    <input id="cie-asunto-aprobacion-<?php echo (int) $post->ID; ?>" type="text" name="asunto_aprobacion" value="Solicitud aprobada" style="width:100%;">
+                </p>
+                <p style="margin:0 0 6px;">
+                    <label for="cie-mensaje-aprobacion-<?php echo (int) $post->ID; ?>"><strong>Mensaje aprobacion</strong></label>
+                    <textarea id="cie-mensaje-aprobacion-<?php echo (int) $post->ID; ?>" name="mensaje_aprobacion" rows="5" style="width:100%;">Tu solicitud fue aprobada. Nuevo periodo: {periodo_nuevo}. Fecha fin: {fecha_fin}.</textarea>
+                </p>
+                <p style="margin:0;">
+                    <button class="button button-primary" type="submit">Aprobar y enviar correo</button>
+                </p>
+            </form>
+
+            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                <input type="hidden" name="action" value="cie_solicitud_rechazar">
+                <input type="hidden" name="solicitud_id" value="<?php echo (int) $post->ID; ?>">
+                <input type="hidden" name="redirect_to" value="<?php echo esc_url($edit_url); ?>">
+                <?php wp_nonce_field('cie_solicitud_rechazar_' . (int) $post->ID, 'cie_reject_nonce'); ?>
+                <p style="margin:0 0 6px;">
+                    <label for="cie-asunto-rechazo-<?php echo (int) $post->ID; ?>"><strong>Asunto revocacion</strong></label>
+                    <input id="cie-asunto-rechazo-<?php echo (int) $post->ID; ?>" type="text" name="asunto_rechazo" value="Solicitud revocada" style="width:100%;">
+                </p>
+                <p style="margin:0 0 6px;">
+                    <label for="cie-mensaje-rechazo-<?php echo (int) $post->ID; ?>"><strong>Mensaje revocacion</strong></label>
+                    <textarea id="cie-mensaje-rechazo-<?php echo (int) $post->ID; ?>" name="mensaje_rechazo" rows="5" style="width:100%;">Tu solicitud de renovacion fue revocada por administracion.</textarea>
+                </p>
+                <p style="margin:0;">
+                    <button class="button" type="submit">Revocar y enviar correo</button>
+                </p>
+            </form>
+            <p style="margin-top:8px;"><small>Puedes usar {periodo_nuevo} y {fecha_fin} en el correo de aprobacion.</small></p>
+        <?php endif; ?>
+    </div>
+    <?php
+}
 
 /* =====================================================
    SHORTCODE + AJAX
@@ -562,15 +868,21 @@ function cie_crear_solicitud($user_id, $meses, $notify_email = '') {
         $notify_email = get_option('admin_email');
     }
 
+    $user = get_userdata((int) $user_id);
+    $title = $user
+        ? sprintf('Solicitud de %s - %d mes(es)', $user->display_name, (int) $meses)
+        : 'Solicitud de renovacion - ' . (int) $meses . ' mes(es)';
+
     $request_id = wp_insert_post([
         'post_type' => 'solicitud',
         'post_status' => 'pending',
         'post_author' => (int) $user_id,
-        'post_title' => 'Renovacion ' . (int) $meses . ' mes(es)',
+        'post_title' => wp_strip_all_tags($title),
         'meta_input' => [
             'meses' => (int) $meses,
             'fecha_solicitud' => current_time('mysql'),
             'notify_email' => $notify_email,
+            'cie_resultado' => 'pendiente',
         ],
     ]);
 
@@ -578,6 +890,7 @@ function cie_crear_solicitud($user_id, $meses, $notify_email = '') {
         return new WP_Error('cie_request_create_error', 'No fue posible crear la solicitud.');
     }
 
+    cie_get_request_action_token((int) $request_id);
     cie_notify_request_target((int) $request_id, $notify_email);
 
     return (int) $request_id;
@@ -604,26 +917,24 @@ function cie_notify_request_target($request_id, $notify_email = '') {
     $status = cie_get_access_status_data($user->ID);
     $days = ($status['days'] === null) ? 'N/A' : (string) $status['days'];
 
-    $approve_url = wp_nonce_url(
-        admin_url('admin-post.php?action=cie_solicitud_aprobar&solicitud_id=' . (int) $request->ID),
-        'cie_solicitud_aprobar_' . (int) $request->ID
-    );
-
-    $revoke_url = wp_nonce_url(
-        admin_url('admin.php?page=cie_gestion_acceso&cie_action=rechazar_form&solicitud_id=' . (int) $request->ID),
-        'cie_solicitud_rechazar_form_' . (int) $request->ID
-    );
+    $requests_url = cie_get_requests_page_url();
+    $edit_url = cie_get_request_edit_url($request->ID);
+    $approve_url = cie_get_request_approve_url($request->ID, true, [
+        'redirect_to' => $requests_url,
+    ]);
 
     $subject = 'Nueva solicitud de renovacion de acceso';
     $message = "Se recibio una solicitud de renovacion.\n\n";
+    $message .= "Solicitud ID: #" . (int) $request->ID . "\n";
     $message .= "Usuario: " . $user->display_name . " (ID " . (int) $user->ID . ")\n";
     $message .= "Email usuario: " . $user->user_email . "\n";
     $message .= "Meses solicitados: " . $months . "\n";
     $message .= "Periodo actual: " . ($period ?: 'Sin periodo') . "\n";
     $message .= "Dias restantes: " . $days . "\n\n";
-    $message .= "Aceptar acceso: " . $approve_url . "\n";
-    $message .= "Revocar solicitud: " . $revoke_url . "\n\n";
-    $message .= "Al revocar podras personalizar el correo que se enviara al usuario.";
+    $message .= "Aprobar ahora: " . $approve_url . "\n";
+    $message .= "Gestionar solicitud (aprobar o revocar con correo editable): " . $edit_url . "\n";
+    $message .= "Listado de solicitudes: " . $requests_url . "\n\n";
+    $message .= "Desde la pantalla de solicitud puedes editar el correo tanto de aprobacion como de revocacion.";
 
     wp_mail($notify_email, $subject, $message);
 }
@@ -632,6 +943,13 @@ function cie_notify_request_target($request_id, $notify_email = '') {
    APROBAR / REVOCAR SOLICITUDES
 ===================================================== */
 
+add_action('admin_post_nopriv_cie_solicitud_aprobar', function () {
+    $request_uri = isset($_SERVER['REQUEST_URI']) ? wp_unslash($_SERVER['REQUEST_URI']) : '';
+    $target = is_string($request_uri) && $request_uri !== '' ? home_url($request_uri) : cie_get_requests_page_url();
+    wp_safe_redirect(wp_login_url($target));
+    exit;
+});
+
 add_action('admin_post_cie_solicitud_aprobar', 'cie_admin_aprobar_solicitud');
 
 function cie_admin_aprobar_solicitud() {
@@ -639,17 +957,33 @@ function cie_admin_aprobar_solicitud() {
         wp_die('No autorizado.');
     }
 
-    $request_id = isset($_GET['solicitud_id']) ? (int) $_GET['solicitud_id'] : 0;
-    check_admin_referer('cie_solicitud_aprobar_' . $request_id);
+    $request_id = isset($_REQUEST['solicitud_id']) ? (int) $_REQUEST['solicitud_id'] : 0;
+    $fallback_redirect = cie_get_requests_page_url();
+    $redirect_url = cie_get_request_redirect_url($fallback_redirect);
+
+    if ($request_id <= 0) {
+        wp_safe_redirect(add_query_arg('cie_notice', 'solicitud_no_encontrada', $redirect_url));
+        exit;
+    }
+
+    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+        check_admin_referer('cie_solicitud_aprobar_manual_' . $request_id, 'cie_approve_nonce');
+    } else {
+        $token = isset($_GET['token']) ? sanitize_text_field(wp_unslash($_GET['token'])) : '';
+        if (!cie_validate_request_action_token($request_id, $token)) {
+            wp_safe_redirect(add_query_arg('cie_notice', 'solicitud_token_invalido', $fallback_redirect));
+            exit;
+        }
+    }
 
     $request = get_post($request_id);
     if (!$request || $request->post_type !== 'solicitud') {
-        wp_safe_redirect(cie_get_admin_page_url(['cie_notice' => 'solicitud_no_encontrada']));
+        wp_safe_redirect(add_query_arg('cie_notice', 'solicitud_no_encontrada', $redirect_url));
         exit;
     }
 
     if ($request->post_status !== 'pending') {
-        wp_safe_redirect(cie_get_admin_page_url(['cie_notice' => 'solicitud_ya_resuelta']));
+        wp_safe_redirect(add_query_arg('cie_notice', 'solicitud_ya_resuelta', $redirect_url));
         exit;
     }
 
@@ -669,10 +1003,10 @@ function cie_admin_aprobar_solicitud() {
     );
 
     if (is_wp_error($result)) {
-        wp_safe_redirect(cie_get_admin_page_url([
+        wp_safe_redirect(add_query_arg([
             'cie_notice' => 'error',
             'cie_error' => $result->get_error_message(),
-        ]));
+        ], $redirect_url));
         exit;
     }
 
@@ -687,14 +1021,32 @@ function cie_admin_aprobar_solicitud() {
 
     $user = get_userdata($user_id);
     if ($user) {
+        $subject = isset($_POST['asunto_aprobacion']) ? sanitize_text_field(wp_unslash($_POST['asunto_aprobacion'])) : 'Solicitud aprobada';
+        if ($subject === '') {
+            $subject = 'Solicitud aprobada';
+        }
+
+        $message_template = isset($_POST['mensaje_aprobacion'])
+            ? sanitize_textarea_field(wp_unslash($_POST['mensaje_aprobacion']))
+            : 'Tu solicitud fue aprobada. Nuevo periodo: {periodo_nuevo}. Fecha fin: {fecha_fin}.';
+
+        if ($message_template === '') {
+            $message_template = 'Tu solicitud fue aprobada. Nuevo periodo: {periodo_nuevo}. Fecha fin: {fecha_fin}.';
+        }
+
+        $mail_message = cie_render_request_mail_template($message_template, [
+            '{periodo_nuevo}' => $result['new_period'],
+            '{fecha_fin}' => $result['new_end']->format('d/m/Y'),
+        ]);
+
         wp_mail(
             $user->user_email,
-            'Solicitud aprobada',
-            'Tu acceso ha sido renovado. Nuevo periodo: ' . $result['new_period']
+            $subject,
+            $mail_message
         );
     }
 
-    wp_safe_redirect(cie_get_admin_page_url(['cie_notice' => 'solicitud_aprobada']));
+    wp_safe_redirect(add_query_arg('cie_notice', 'solicitud_aprobada', $redirect_url));
     exit;
 }
 
@@ -705,18 +1057,31 @@ function cie_admin_rechazar_solicitud() {
         wp_die('No autorizado.');
     }
 
+    $fallback_redirect = cie_get_requests_page_url();
+    $redirect_url = cie_get_request_redirect_url($fallback_redirect);
     $request_id = isset($_POST['solicitud_id']) ? (int) $_POST['solicitud_id'] : 0;
+
+    if ($request_id <= 0) {
+        wp_safe_redirect(add_query_arg('cie_notice', 'solicitud_no_encontrada', $redirect_url));
+        exit;
+    }
+
     check_admin_referer('cie_solicitud_rechazar_' . $request_id, 'cie_reject_nonce');
 
     $request = get_post($request_id);
     if (!$request || $request->post_type !== 'solicitud') {
-        wp_safe_redirect(cie_get_admin_page_url(['cie_notice' => 'solicitud_no_encontrada']));
+        wp_safe_redirect(add_query_arg('cie_notice', 'solicitud_no_encontrada', $redirect_url));
         exit;
     }
 
     if ($request->post_status !== 'pending') {
-        wp_safe_redirect(cie_get_admin_page_url(['cie_notice' => 'solicitud_ya_resuelta']));
+        wp_safe_redirect(add_query_arg('cie_notice', 'solicitud_ya_resuelta', $redirect_url));
         exit;
+    }
+
+    $subject = isset($_POST['asunto_rechazo']) ? sanitize_text_field(wp_unslash($_POST['asunto_rechazo'])) : '';
+    if ($subject === '') {
+        $subject = 'Solicitud revocada';
     }
 
     $message = isset($_POST['mensaje_rechazo']) ? sanitize_textarea_field(wp_unslash($_POST['mensaje_rechazo'])) : '';
@@ -732,14 +1097,15 @@ function cie_admin_rechazar_solicitud() {
     update_post_meta($request_id, 'cie_resultado', 'revocada');
     update_post_meta($request_id, 'cie_resuelta_en', current_time('mysql'));
     update_post_meta($request_id, 'cie_resuelta_por', get_current_user_id());
+    update_post_meta($request_id, 'cie_asunto_revocacion', $subject);
     update_post_meta($request_id, 'cie_mensaje_revocacion', $message);
 
     $user = get_userdata((int) $request->post_author);
     if ($user) {
-        wp_mail($user->user_email, 'Solicitud revocada', $message);
+        wp_mail($user->user_email, $subject, $message);
     }
 
-    wp_safe_redirect(cie_get_admin_page_url(['cie_notice' => 'solicitud_revocada']));
+    wp_safe_redirect(add_query_arg('cie_notice', 'solicitud_revocada', $redirect_url));
     exit;
 }
 
@@ -859,6 +1225,7 @@ function cie_render_admin_notices() {
         'acceso_renovado' => ['updated', 'Acceso renovado correctamente desde la tabla.'],
         'solicitud_no_encontrada' => ['error', 'No se encontro la solicitud indicada.'],
         'solicitud_ya_resuelta' => ['error', 'La solicitud ya fue procesada previamente.'],
+        'solicitud_token_invalido' => ['error', 'El enlace de aprobacion no es valido o ya no esta disponible.'],
     ];
 
     if ($notice === 'error') {
@@ -873,58 +1240,31 @@ function cie_render_admin_notices() {
     }
 }
 
-function cie_render_reject_form_box() {
+add_action('admin_notices', function () {
+    $screen = function_exists('get_current_screen') ? get_current_screen() : null;
+    if (!$screen) {
+        return;
+    }
+
+    if ($screen->post_type === 'solicitud') {
+        cie_render_admin_notices();
+    }
+});
+
+add_action('admin_init', function () {
     $action = isset($_GET['cie_action']) ? sanitize_key(wp_unslash($_GET['cie_action'])) : '';
     if ($action !== 'rechazar_form') {
         return;
     }
 
     $request_id = isset($_GET['solicitud_id']) ? (int) $_GET['solicitud_id'] : 0;
-    $nonce = isset($_GET['_wpnonce']) ? sanitize_text_field(wp_unslash($_GET['_wpnonce'])) : '';
-    if (!$request_id || !wp_verify_nonce($nonce, 'cie_solicitud_rechazar_form_' . $request_id)) {
-        echo '<div class="notice notice-error"><p>Enlace de revocacion invalido o expirado.</p></div>';
+    if ($request_id <= 0) {
         return;
     }
 
-    $request = get_post($request_id);
-    if (!$request || $request->post_type !== 'solicitud') {
-        echo '<div class="notice notice-error"><p>No se encontro la solicitud.</p></div>';
-        return;
-    }
-
-    if ($request->post_status !== 'pending') {
-        echo '<div class="notice notice-error"><p>La solicitud ya fue procesada previamente.</p></div>';
-        return;
-    }
-
-    $user = get_userdata((int) $request->post_author);
-    if (!$user) {
-        echo '<div class="notice notice-error"><p>No se encontro el usuario de la solicitud.</p></div>';
-        return;
-    }
-
-    ?>
-    <div class="card" style="max-width:900px;margin:16px 0;padding:16px;">
-        <h2 style="margin-top:0;">Revocar solicitud #<?php echo (int) $request_id; ?></h2>
-        <p>
-            <strong>Usuario:</strong> <?php echo esc_html($user->display_name); ?>
-            (<?php echo esc_html($user->user_email); ?>)
-        </p>
-        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
-            <input type="hidden" name="action" value="cie_solicitud_rechazar">
-            <input type="hidden" name="solicitud_id" value="<?php echo (int) $request_id; ?>">
-            <?php wp_nonce_field('cie_solicitud_rechazar_' . $request_id, 'cie_reject_nonce'); ?>
-            <p>
-                <label for="cie-mensaje-rechazo"><strong>Mensaje para el usuario</strong></label><br>
-                <textarea id="cie-mensaje-rechazo" name="mensaje_rechazo" rows="5" style="width:100%;">Tu solicitud de renovacion fue revocada por administracion.</textarea>
-            </p>
-            <p>
-                <button type="submit" class="button button-primary">Revocar y enviar correo</button>
-            </p>
-        </form>
-    </div>
-    <?php
-}
+    wp_safe_redirect(cie_get_request_edit_url($request_id));
+    exit;
+});
 
 function cie_render_admin_page() {
     if (!current_user_can(cie_admin_capability())) {
@@ -952,7 +1292,6 @@ function cie_render_admin_page() {
     echo '<h1>Gestion acceso</h1>';
 
     cie_render_admin_notices();
-    cie_render_reject_form_box();
 
     ?>
     <form method="get" style="margin:14px 0;">
